@@ -1,0 +1,4 @@
+nvidia-nat[langchain]~=1.4
+httpx
+langchain-core
+pydantic

@@ -1,0 +1,56 @@
+functions:
+  planner:
+    _type: planner_agent
+    llm_name: nim_llm
+  constructor:
+    _type: constructor_agent
+    llm_name: nim_llm
+  inspect:
+    _type: inspect_agent
+    output_file_path: "runtime/outputs/output.py"
+    execute_timeout: 60
+
+llms:
+  nim_llm:
+    _type: nim
+    model_name: qwen/qwen3-coder-480b-a35b-instruct
+    temperature: 0.3
+    max_tokens: 10000
+    timeout: 120 
+
+workflow:
+  _type: react_agent
+  llm_name: nim_llm
+  tool_names: [planner, constructor, inspect]
+  verbose: true
+  max_tool_calls: 10
+  use_tool_schema: true
+  return_last_tool_output: false
+  parse_agent_response_max_retries: 3
+  additional_instructions: |
+    You are a workflow orchestrator executing a 3-step code generation pipeline.
+
+    MANDATORY WORKFLOW:
+    
+
+    planner(user_query) → Generates JSON plan
+        constructor() → Builds code from plan (no input is needed)
+
+    inspect() → Validates and executes code (no input is needed)
+
+    ERROR HANDLING:
+    IF inspect returns "OVERALL STATUS: Failed":
+
+        Pass the Full inspect report to constructor(error_report)
+
+    Call inspect() againRepeat max 3 timesIF inspect returns "OVERALL STATUS: Passed":
+
+        Extract the "Execution Output:" section
+
+        Present ONLY that output to the userSTOP calling tools
+
+    CRITICAL RULES:
+    Do NOT call constructor multiple times without inspect
+    Do NOT modify user queries before passing to planner
+    Do NOT present pseudocode or Python source code
+    Present ONLY the executed output

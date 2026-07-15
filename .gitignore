@@ -1,0 +1,39 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Editor / tool caches
+.vscode/
+.cursor/
+.tmp/
+.idea/
+
+# Local run-state / scratch data (confirm these aren't needed by teammates)
+progress.json
+user_progress.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Runtime artifacts
+runtime/cache/
+runtime/generated/
+runtime/logs/
+runtime/outputs/
