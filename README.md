@@ -29,20 +29,33 @@ Renkai is a multi-agent workflow built on top of [NVIDIA NeMo Agent Toolkit (NAT
 
 ```bash
 uv venv --python 3.12 --seed .venv
-.venv\Scripts\activate
+source .venv/bin/activate
 uv pip install -r requirements.txt
 nat --version
 ```
 
-Create a `.env` file from `.env.example` and populate the required API keys.
+Create a local `.env` file from `.env.example` and set `NVIDIA_API_KEY`. The
+`.env` file is gitignored and must never be committed.
+
+```bash
+cp .env.example .env
+# Edit .env and replace `your_key_here` with your NVIDIA API key.
+```
 
 ## Running
 
 The checked-in server entrypoint now assumes the repository root is the working directory:
 
 ```bash
-.venv\Scripts\activate
+source .venv/bin/activate
 python server.py
+```
+
+To run the ROT workflow directly, use the included launcher. It loads the
+gitignored `.env` file before it starts NAT:
+
+```bash
+./scripts/run_rot.sh "what is machine learning?"
 ```
 
 The DeerFlow package in this snapshot lives under `backend/deerflow/`. The gateway directory has been created at `backend/gateway/`, but no gateway application source is present in this workspace, so any gateway-specific startup command still requires that missing source to be restored.
