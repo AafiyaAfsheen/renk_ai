@@ -31,11 +31,15 @@ def is_html_project(plan_data: dict) -> bool:
     HTML mode for: games, dashboards, visual tools, web UIs.
     Python mode for: algorithms, data processing, simulations, CLI tools.
     """
+    declared_output_type = str(plan_data.get("output_type", "")).strip().lower()
+    if declared_output_type == "python":
+        return False
+    if declared_output_type == "html":
+        return True
+
     project = plan_data.get("project", "").lower()
     steps   = json.dumps(plan_data.get("algorithm_steps", [])).lower()
-    # Explicit HTML from planner
-    if plan_data.get("output_type") == "html":
-        return True
+    # Legacy fallback only for plans that do not declare a recognized type.
     html_keywords = [
         "html", "css", "webpage", "website", "web page", "frontend",
         "tailwind", "dashboard", "ui", "interface", "game", "tic tac",
@@ -111,11 +115,19 @@ async def constructor_agent_function(config: ConstructorAgentFunctionConfig, bui
 
         project         = plan_data.get("project", "Unnamed")
         algorithm_steps = plan_data["algorithm_steps"]
-        html_mode       = is_html_project(plan_data)
+        declared_type   = str(plan_data.get("output_type", "")).strip().lower()
+
+        # Prefer explicit planner declaration. If planner declares 'python' or
+        # 'html', obey it exactly. Only fall back to heuristic detection when
+        # no explicit output_type is provided or it's unrecognized.
+        if declared_type in {"python", "html"}:
+            html_mode = (declared_type == "html")
+        else:
+            html_mode = is_html_project(plan_data)
         sim_mode        = needs_simulation(plan_data) and not html_mode
         OUT_FILE        = OUT_HTML if html_mode else OUT_PY
 
-        logger.info(f"[Constructor] Mode={'HTML' if html_mode else 'Python'} Sim={sim_mode} | {project}")
+        logger.info(f"[Constructor] Mode={'HTML' if html_mode else 'Python'} (declared={declared_type or 'unspecified'}) Sim={sim_mode} | {project}")
 
         llm = await builder.get_llm(
             llm_name=config.llm_name,

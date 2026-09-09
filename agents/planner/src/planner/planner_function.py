@@ -66,7 +66,7 @@ def load_research_context() -> str:
     try:
         with open(RESEARCH_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("status") == "ready":
+        if data.get("status") in {"ready", "fallback"}:
             return data.get("research", "")
     except Exception:
         pass

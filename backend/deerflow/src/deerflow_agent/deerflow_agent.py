@@ -4,8 +4,10 @@
 import logging
 import json
 import os
+import secrets
 import httpx
 from pathlib import Path
+import re
 
 from pydantic import Field
 from nat.builder.builder import Builder
@@ -20,6 +22,10 @@ ROOT_DIR = Path(__file__).resolve().parents[4]
 RESEARCH_OUTPUT = ROOT_DIR / "runtime" / "generated" / "research_output.json"
 ROUTING_FILE = ROOT_DIR / "runtime" / "generated" / "routing_decision.json"
 DIRECT_OUTPUT = ROOT_DIR / "runtime" / "generated" / "direct_output.txt"
+
+DEFAULT_DEERFLOW_URL = "http://localhost:2026"
+DEFAULT_DEERFLOW_OWNER_USER_ID = "renkai"
+DEERFLOW_TOKEN_ENV_VAR = "DEERFLOW_INTERNAL_AUTH_TOKEN"
 
 
 class DeerflowAgentFunctionConfig(FunctionBaseConfig, name="deerflow_agent"):
@@ -43,16 +49,25 @@ async def deerflow_agent_function(config: DeerflowAgentFunctionConfig, builder: 
             logger.info(f"[DeerFlow] Direct answer saved ({len(result)} chars)")
             return result
 
+        research_status, research_error = _research_result_status(result)
         os.makedirs(os.path.dirname(RESEARCH_OUTPUT), exist_ok=True)
         with open(RESEARCH_OUTPUT, "w", encoding="utf-8") as f:
             json.dump({
                 "query":    original_input,
-                "research": result,
+                "research": result if research_status in {"ready", "fallback"} else "",
                 "lane":     "build_pipeline",
-                "status":   "ready"
+                "status":   research_status,
+                "error":    research_error,
             }, f, indent=2, ensure_ascii=False)
 
-        logger.info("[DeerFlow] Research saved → Planner ready ")
+        if research_status == "failed":
+            logger.error("[RENKAI] Research failed: %s", research_error)
+            return f"RESEARCH_FAILED: {research_error}. Planner may continue without DeerFlow research."
+        if research_status == "fallback":
+            logger.warning("[RENKAI] Research unavailable; NIM fallback recorded")
+            return "RESEARCH_FALLBACK: NIM research saved. Planner can proceed."
+
+        logger.info("[RENKAI] Research succeeded; Planner ready")
         return "RESEARCH_READY: DeerFlow complete. Planner can proceed."
 
     yield FunctionInfo.create(
@@ -70,42 +85,130 @@ def _read_routing(fallback_input: str):
         return "deerflow_direct", fallback_input
 
 
+def _research_result_status(result: str) -> tuple[str, str | None]:
+    """Classify a DeerFlow research result before persisting planner context."""
+    # Exact fallback marker used when DeerFlow is unreachable and we used NIM.
+    if "DeerFlow unavailable; NIM fallback used" in result:
+        return "fallback", "DeerFlow unavailable; NIM fallback used"
+
+    # Authentication errors or explicit auth failure messages
+    if "authentication failed" in result.lower() or "x-deerflow-internal-token" in result.lower():
+        return "failed", "DeerFlow authentication failed"
+
+    # Generic API errors (HTTP status codes or API error text)
+    if "deerflow api error" in result.lower() or re.search(r"http\s*\d{3}", result.lower()):
+        match = re.search(r"http\s*(\d{3})", result, re.I)
+        detail = f"DeerFlow HTTP {match.group(1)}" if match else "DeerFlow API error"
+        return "failed", detail
+
+    # Otherwise assume we have usable research content
+    return "ready", None
+
+
 async def _call_deerflow_or_fallback(query: str, lane: str, builder, config) -> str:
     task = query if lane == "deerflow_direct" else (
         f"Research this software build request thoroughly: {query}. "
         "Return: best libraries, architecture patterns, implementation steps, key considerations."
     )
 
-    # Try DeerFlow HTTP first
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            thread = await client.post("http://localhost:2025/threads", json={})
-            tid    = thread.json()["thread_id"]
-            run    = await client.post(
-                f"http://localhost:2025/threads/{tid}/runs/wait",
-                json={
-                    "assistant_id": "bee7d354-5df5-5f26-a978-10ea053f620d",
-                    "input": {"messages": [{"role": "user", "content": task}]},
-                    "config": {"configurable": {"thread_id": tid}, "recursion_limit": 100}
-                }
-            )
-            if run.status_code == 200:
-                data = run.json()
-                if "__error__" not in data:
-                    for msg in reversed(data.get("messages", [])):
-                        if msg.get("role") == "assistant" or msg.get("type") == "ai":
-                            content = msg.get("content", "")
-                            if isinstance(content, list):
-                                content = " ".join(c.get("text","") for c in content if isinstance(c,dict))
-                            if content:
-                                logger.info("[DeerFlow] HTTP response ")
-                                return content
-    except Exception as e:
-        logger.warning(f"[DeerFlow] HTTP failed: {e}")
+    deerflow_url = os.getenv("DEERFLOW_URL", DEFAULT_DEERFLOW_URL).rstrip("/")
+    internal_token = os.getenv(DEERFLOW_TOKEN_ENV_VAR)
+    owner_user_id = os.getenv("DEERFLOW_OWNER_USER_ID", DEFAULT_DEERFLOW_OWNER_USER_ID)
 
-    # Fallback to NIM LLM
-    logger.info("[DeerFlow] Falling back to NIM LLM")
-    return await _nim_fallback(query, lane, builder, config)
+    if not internal_token:
+        logger.error("[RENKAI] DeerFlow authentication failed: %s is not set", DEERFLOW_TOKEN_ENV_VAR)
+        return f"[RENKAI] DeerFlow authentication failed: {DEERFLOW_TOKEN_ENV_VAR} is not configured."
+
+    # The current DeerFlow Gateway applies CSRF middleware before Internal Auth.
+    # It requires a double-submit pair even for trusted backend callers: the
+    # cookie and header values must be identical. This is generated anew for
+    # every backend request and is never logged.
+    csrf_token = secrets.token_urlsafe(48)
+    headers = {
+        "Content-Type": "application/json",
+        "X-DeerFlow-Internal-Token": internal_token,
+        "X-DeerFlow-Owner-User-Id": owner_user_id,
+        "X-CSRF-Token": csrf_token,
+        "Cookie": f"csrf_token={csrf_token}",
+    }
+    payload = {
+        "assistant_id": "lead_agent",
+        "input": {"messages": [{"role": "user", "content": task}]},
+    }
+
+    try:
+        logger.info("[RENKAI] DeerFlow request started")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+            response = await client.post(f"{deerflow_url}/api/runs/wait", headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        logger.warning("[RENKAI] DeerFlow unavailable: %s", exc)
+        fallback = await _nim_fallback(query, lane, builder, config)
+        return "[RENKAI] DeerFlow unavailable; NIM fallback used.\n\n" + fallback
+
+    if response.status_code in {401, 403}:
+        logger.error("[RENKAI] DeerFlow authentication failed: HTTP %s", response.status_code)
+        return f"[RENKAI] DeerFlow authentication failed (HTTP {response.status_code})."
+    if response.status_code != 200:
+        logger.error("[RENKAI] DeerFlow API error: HTTP %s", response.status_code)
+        return f"[RENKAI] DeerFlow API error (HTTP {response.status_code}): {_response_detail(response)}"
+
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        logger.error("[RENKAI] DeerFlow API error: invalid JSON response")
+        return "[RENKAI] DeerFlow API error: Gateway returned invalid JSON."
+
+    content = _extract_assistant_content(data)
+    if content:
+        logger.info("[RENKAI] DeerFlow request succeeded")
+        return content
+
+    logger.error("[RENKAI] DeerFlow API error: no assistant message in response")
+    return "[RENKAI] DeerFlow API error: Gateway response contained no assistant message."
+
+
+def _response_detail(response: httpx.Response) -> str:
+    """Return a concise, non-secret error detail from a Gateway response."""
+    try:
+        detail = response.json().get("detail", response.text)
+    except (json.JSONDecodeError, AttributeError):
+        detail = response.text
+    return str(detail)[:500]
+
+
+def _extract_assistant_content(data: object) -> str | None:
+    """Extract the final assistant message from DeerFlow's current wait response."""
+    if not isinstance(data, dict):
+        return None
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "assistant" and message.get("type") != "ai":
+            continue
+        content = _normalise_message_content(message.get("content"))
+        if content:
+            return content
+    return None
+
+
+def _normalise_message_content(content: object) -> str:
+    """Handle both string and structured LangChain/OpenAI-style message content."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            text = item.get("text") or item.get("content")
+            if isinstance(text, str):
+                parts.append(text)
+    return " ".join(parts)
 
 
 async def _nim_fallback(query: str, lane: str, builder, config) -> str:

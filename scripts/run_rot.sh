@@ -21,4 +21,11 @@ if [[ -z "${NVIDIA_API_KEY:-}" ]]; then
     exit 1
 fi
 
-exec nat run --config_file "$CONFIG_FILE" --input "$*"
+NAT_BIN="$ROOT_DIR/.venv/bin/nat"
+
+if [[ ! -x "$NAT_BIN" ]]; then
+    echo "Missing RENKAI virtual environment at $ROOT_DIR/.venv. Install workspace dependencies first." >&2
+    exit 1
+fi
+
+exec "$NAT_BIN" run --config_file "$CONFIG_FILE" --input "$*"

@@ -26,6 +26,7 @@ async def rot_function(
     deerflow_fn = await builder.get_function("deerflow_agent")
     planner_fn = await builder.get_function("planner")
     constructor_fn = await builder.get_function("constructor")
+    inspector_fn = await builder.get_function("inspector")
 
     async def _response_fn(input_message: str) -> str:
 
@@ -111,6 +112,22 @@ async def rot_function(
             "[RENKAI] Constructor completed"
         )
 
+        # Constructor owns Python self-repair and invokes Inspector while it
+        # repairs. Run the existing inspector once more as the explicit final
+        # build-stage verdict returned by the deterministic ROT pipeline.
+        inspector_result = "Not run (non-Python output)."
+        try:
+            plan = json.loads(planner_result)
+        except Exception:
+            plan = {}
+        if str(plan.get("output_type", "")).lower() == "python":
+            logger.info("[RENKAI] Inspector started")
+            inspector_result = await inspector_fn.ainvoke("check")
+            if "OVERALL STATUS: PASSED" in inspector_result:
+                logger.info("[RENKAI] Inspector result: PASSED")
+            else:
+                logger.error("[RENKAI] Inspector result: FAILED")
+
         # --------------------------------------------------
         # FINAL RESPONSE
         # --------------------------------------------------
@@ -118,7 +135,8 @@ async def rot_function(
         return (
             "RENKAI build pipeline completed.\n\n"
             f"Planner:\n{planner_result}\n\n"
-            f"Constructor:\n{constructor_result}"
+            f"Constructor:\n{constructor_result}\n\n"
+            f"Inspector:\n{inspector_result}"
         )
 
     yield FunctionInfo.create(
