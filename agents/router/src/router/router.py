@@ -83,18 +83,22 @@ Respond ONLY with valid JSON:
   "original_input": "{input_message.replace('"', "'")}"
 }}
 """
-        resp    = await llm.ainvoke(prompt)
-        content = resp.content if hasattr(resp, "content") else str(resp)
-        content = re.sub(r"```json|```", "", content).strip()
-
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            try:
-                result = json.loads(match.group(0))
-            except Exception:
-                result = _fallback_route(input_message)
-        else:
+        try:
+            resp    = await llm.ainvoke(prompt)
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = re.sub(r"```json|```", "", content).strip()
+        except Exception as exc:
+            logger.warning("[Router] LLM call failed; using fallback route: %s", exc)
             result = _fallback_route(input_message)
+        else:
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                try:
+                    result = json.loads(match.group(0))
+                except Exception:
+                    result = _fallback_route(input_message)
+            else:
+                result = _fallback_route(input_message)
 
         build_words = ["build", "create", "make", "generate", "code", "develop",
                        "write a script", "write a program", "build an agent",
@@ -123,11 +127,12 @@ Respond ONLY with valid JSON:
 
 
 def _fallback_route(input_message: str) -> dict:
+    text = (input_message or "").lower()
     build_words = ["build", "create", "make", "generate", "code", "develop",
                    "write a script", "write a program", "simulate", "implement",
-                   "write me a", "give me a script", "make me a", "build me a"]
-    lane = "build_pipeline" if any(w in input_message.lower() for w in build_words) \
-           else "deerflow_direct"
+                   "write me a", "give me a script", "make me a", "build me a",
+                   "design a program", "make a tool", "create an app", "build an agent"]
+    lane = "build_pipeline" if any(w in text for w in build_words) else "deerflow_direct"
     return {
         "lane":           lane,
         "reason":         "Fallback routing based on keyword detection",

@@ -36,12 +36,14 @@ PATH_OUTPUT_PY = str(PYTHON_OUTPUT)
 PATH_OUTPUT_HTML = str(HTML_OUTPUT)
 PATH_DIRECT_OUT = str(DIRECT_OUTPUT)
 CONFIG_FILE = str(ROT_CONFIG)
+NAT_BIN = str(ROOT_DIR / ".venv" / "bin" / "nat")
 
 run_status = {
     "status": "IDLE",
     "log": [],
     "exec_output": None,
     "inspector_passed": None,
+    "pipeline_success": None,
     "output_type": "html",
     "elapsed": None,
 }
@@ -99,7 +101,8 @@ def run_nat(user_input):
 
     safe_input = user_input.replace('"', '\\"')
     config_rel = os.path.relpath(CONFIG_FILE, THIS_DIR)
-    cmd = f'nat run --config_file "{config_rel}" --input "{safe_input}"'
+    nat_cmd = NAT_BIN if os.path.exists(NAT_BIN) else "nat"
+    cmd = f'"{nat_cmd}" run --config_file "{config_rel}" --input "{safe_input}"'
 
     print(f"\n[RENKAI] {cmd}\n")
 
@@ -194,11 +197,35 @@ def run_nat(user_input):
                             "Check the terminal for the agent response."
                         )
 
+        plan_obj = safe_json(PATH_PLAN)
+        planner_ok = bool(plan_obj and plan_obj.get("status") != "failed" and plan_obj.get("algorithm_steps"))
+        constructor_ok = os.path.exists(PATH_OUTPUT_PY) or os.path.exists(PATH_OUTPUT_HTML)
+        inspector_ok = bool(parsed["passed"] or ("OVERALL STATUS: PASSED" in full_text))
+        direct_ok = bool(safe_text(PATH_DIRECT_OUT) and safe_text(PATH_DIRECT_OUT).strip())
+
+        if safe_text(PATH_DIRECT_OUT) and safe_text(PATH_DIRECT_OUT).strip():
+            run_status["output_type"] = "direct"
+
         if run_status["inspector_passed"] is None:
-            run_status["inspector_passed"] = parsed["passed"] or (exit_code == 0)
+            run_status["inspector_passed"] = inspector_ok
+
+        if not planner_ok and not direct_ok:
+            run_status["pipeline_success"] = False
+            run_status["status"] = "DONE"
+        elif not planner_ok and direct_ok:
+            run_status["pipeline_success"] = True
+            run_status["status"] = "DONE"
+        elif planner_ok and not constructor_ok:
+            run_status["pipeline_success"] = False
+            run_status["status"] = "DONE"
+        elif planner_ok and constructor_ok and not inspector_ok:
+            run_status["pipeline_success"] = False
+            run_status["status"] = "DONE"
+        else:
+            run_status["pipeline_success"] = bool(planner_ok and constructor_ok and inspector_ok)
+            run_status["status"] = "DONE"
 
         run_status["elapsed"] = round(time.time() - start, 1)
-        run_status["status"] = "DONE"
 
     print(f"\n[RENKAI] Done in {run_status['elapsed']}s  exit={exit_code}")
 
@@ -247,6 +274,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "code": safe_text(PATH_OUTPUT_PY),
                     "exec_output": run_status["exec_output"],
                     "inspector_passed": run_status["inspector_passed"],
+                    "pipeline_success": run_status.get("pipeline_success"),
                     "output_type": run_status["output_type"],
                     "elapsed": run_status["elapsed"],
                     "html_content": safe_text(PATH_OUTPUT_HTML),
@@ -340,7 +368,8 @@ def startup_checks():
     else:
         print(f"  X  UI file missing in {FRONTEND_DIR}")
 
-    result = subprocess.run("nat --version", shell=True, capture_output=True, text=True)
+    nat_path = NAT_BIN if os.path.exists(NAT_BIN) else "nat"
+    result = subprocess.run(f'"{nat_path}" --version', shell=True, capture_output=True, text=True)
     print(f"  {'OK' if result.returncode == 0 else 'X'}  nat CLI")
     print("=" * 56)
     print(f"  Open: http://localhost:{PORT}")

@@ -4,10 +4,10 @@
 import logging
 import json
 import os
+import re
 import secrets
 import httpx
 from pathlib import Path
-import re
 
 from pydantic import Field
 from nat.builder.builder import Builder
@@ -87,21 +87,14 @@ def _read_routing(fallback_input: str):
 
 def _research_result_status(result: str) -> tuple[str, str | None]:
     """Classify a DeerFlow research result before persisting planner context."""
-    # Exact fallback marker used when DeerFlow is unreachable and we used NIM.
-    if "DeerFlow unavailable; NIM fallback used" in result:
+    if result.startswith("[RENKAI] DeerFlow unavailable; NIM fallback used."):
         return "fallback", "DeerFlow unavailable; NIM fallback used"
-
-    # Authentication errors or explicit auth failure messages
-    if "authentication failed" in result.lower() or "x-deerflow-internal-token" in result.lower():
-        return "failed", "DeerFlow authentication failed"
-
-    # Generic API errors (HTTP status codes or API error text)
-    if "deerflow api error" in result.lower() or re.search(r"http\s*\d{3}", result.lower()):
-        match = re.search(r"http\s*(\d{3})", result, re.I)
+    if result.startswith("[RENKAI] DeerFlow API error"):
+        match = re.search(r"HTTP (\d+)", result)
         detail = f"DeerFlow HTTP {match.group(1)}" if match else "DeerFlow API error"
         return "failed", detail
-
-    # Otherwise assume we have usable research content
+    if result.startswith("[RENKAI] DeerFlow authentication failed"):
+        return "failed", "DeerFlow authentication failed"
     return "ready", None
 
 
@@ -212,21 +205,22 @@ def _normalise_message_content(content: object) -> str:
 
 
 async def _nim_fallback(query: str, lane: str, builder, config) -> str:
-    llm = await builder.get_llm(
-        llm_name=config.llm_name,
-        wrapper_type=LLMFrameworkEnum.LANGCHAIN
-    )
+    try:
+        llm = await builder.get_llm(
+            llm_name=config.llm_name,
+            wrapper_type=LLMFrameworkEnum.LANGCHAIN
+        )
 
-    if lane == "deerflow_direct":
-        prompt = f"""Answer this request fully and thoroughly. Use markdown formatting.
+        if lane == "deerflow_direct":
+            prompt = f"""Answer this request fully and thoroughly. Use markdown formatting.
 Use ## for sections, ### for subsections, **bold** for key terms, bullet lists where appropriate.
 Give a COMPLETE answer — do not truncate or summarize.
 
 USER REQUEST: {query}
 
 Provide the full detailed answer now:"""
-    else:
-        prompt = f"""Research this software build request and return structured findings.
+        else:
+            prompt = f"""Research this software build request and return structured findings.
 
 BUILD REQUEST: {query}
 
@@ -236,5 +230,17 @@ Cover:
 - Key implementation steps  
 - Important considerations and gotchas"""
 
-    resp = await llm.ainvoke(prompt)
-    return resp.content if hasattr(resp, "content") else str(resp)
+        resp = await llm.ainvoke(prompt)
+        return resp.content if hasattr(resp, "content") else str(resp)
+    except Exception as exc:
+        logger.warning("[DeerFlow] NIM fallback failed; using deterministic offline guidance: %s", exc)
+        if lane == "deerflow_direct":
+            return (
+                f"This request is best answered directly without external model access.\n\n"
+                f"User request: {query}\n\n"
+                "Key idea: explain the concept clearly, define the core components, provide a simple example, and note practical uses."
+            )
+        return (
+            f"Offline build guidance for: {query}\n\n"
+            "Recommended approach: choose a small Python CLI or single-file app, keep the logic in standard-library functions, validate inputs, print readable output, and test against a few sample cases."
+        )

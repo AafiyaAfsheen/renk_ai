@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 
 from nat.builder.builder import Builder
 from nat.builder.function_info import FunctionInfo
@@ -92,6 +93,20 @@ async def rot_function(
             input_message
         )
 
+        try:
+            planner_payload = json.loads(planner_result)
+        except Exception:
+            planner_payload = {}
+
+        if not planner_payload or planner_payload.get("status") == "failed" or not planner_payload.get("algorithm_steps"):
+            logger.error("[RENKAI] Planner failed — stopping build pipeline")
+            return (
+                "RENKAI build pipeline failed.\n\n"
+                f"Planner:\n{planner_result}\n\n"
+                "Constructor:\nNot run\n\n"
+                "Inspector:\nNot run"
+            )
+
         logger.info(
             "[RENKAI] Planner completed"
         )
@@ -108,25 +123,43 @@ async def rot_function(
             "build"
         )
 
+        if not constructor_result or "ERROR:" in str(constructor_result):
+            logger.error("[RENKAI] Constructor failed — stopping build pipeline")
+            return (
+                "RENKAI build pipeline failed.\n\n"
+                f"Planner:\n{planner_result}\n\n"
+                f"Constructor:\n{constructor_result}\n\n"
+                "Inspector:\nNot run"
+            )
+
         logger.info(
             "[RENKAI] Constructor completed"
         )
 
         # Constructor owns Python self-repair and invokes Inspector while it
-        # repairs. Run the existing inspector once more as the explicit final
-        # build-stage verdict returned by the deterministic ROT pipeline.
+        # repairs. Run the explicit final build-stage verdict only for valid Python plans.
         inspector_result = "Not run (non-Python output)."
-        try:
-            plan = json.loads(planner_result)
-        except Exception:
-            plan = {}
-        if str(plan.get("output_type", "")).lower() == "python":
+        if str(planner_payload.get("output_type", "")).lower() == "python":
+            if not os.path.exists(os.path.join("runtime", "outputs", "output.py")):
+                logger.error("[RENKAI] No Python artifact produced for valid plan")
+                return (
+                    "RENKAI build pipeline failed.\n\n"
+                    f"Planner:\n{planner_result}\n\n"
+                    f"Constructor:\n{constructor_result}\n\n"
+                    "Inspector:\nNot run (no output.py artifact)"
+                )
             logger.info("[RENKAI] Inspector started")
             inspector_result = await inspector_fn.ainvoke("check")
             if "OVERALL STATUS: PASSED" in inspector_result:
                 logger.info("[RENKAI] Inspector result: PASSED")
             else:
                 logger.error("[RENKAI] Inspector result: FAILED")
+                return (
+                    "RENKAI build pipeline failed.\n\n"
+                    f"Planner:\n{planner_result}\n\n"
+                    f"Constructor:\n{constructor_result}\n\n"
+                    f"Inspector:\n{inspector_result}"
+                )
 
         # --------------------------------------------------
         # FINAL RESPONSE

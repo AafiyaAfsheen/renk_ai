@@ -445,13 +445,12 @@ function extractExecOutput(d){
   Checks if the inspector reported PASSED or FAILED.
 */
 function determineStatus(d){
-  // Server can send this explicitly
-  if(d.inspector_passed !== undefined) return d.inspector_passed;
+  if(d.pipeline_success !== undefined) return Boolean(d.pipeline_success);
+  if(d.inspector_passed !== undefined) return Boolean(d.inspector_passed);
 
-  if(!d.log || !d.log.length) return true; // assume ok if no log
+  if(!d.log || !d.log.length) return true;
   const joined = d.log.join('\n');
 
-  // If any PASSED exists and it's the last STATUS line → passed
   const lastStatusMatch = [...joined.matchAll(/OVERALL STATUS:\s*(\w+)/g)].pop();
   if(lastStatusMatch) return lastStatusMatch[1].toUpperCase() === 'PASSED';
 
@@ -717,7 +716,7 @@ async function doPoll(){
       isRunning = false;
       setRunBtn(false);
 
-      const statusOk  = d.status !== 'ERROR' && determineStatus(d);
+      const statusOk  = determineStatus(d);
       const hasFix    = (d.log||[]).some(l => /fix|attempt\s*2/i.test(l));
       const execOutput = extractExecOutput(d);  // ← THE KEY CALL
       const lines      = d.code ? d.code.split('\n').length : 0;

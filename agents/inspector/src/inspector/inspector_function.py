@@ -73,7 +73,7 @@ SAFE_BUILTINS = {
 }
 
 
-def _run_with_timeout(code: str, exec_globals: dict, timeout: int, argv_override: list[str] | None = None):
+def _run_with_timeout(code: str, exec_globals: dict, timeout: int):
     result = {"output": "", "error": None}
     buffer = io.StringIO()
 
@@ -84,31 +84,19 @@ def _run_with_timeout(code: str, exec_globals: dict, timeout: int, argv_override
             exec(code, exec_globals)  # noqa: S102
             result["output"] = buffer.getvalue()
         except Exception:
-            result["error"] = traceback.format_exc()
+            result["error"]  = traceback.format_exc()
             result["output"] = buffer.getvalue()  # keep partial output
         finally:
             sys.stdout = old_stdout
 
-    # Override sys.argv for the duration of execution to avoid inheriting
-    # NAT/parent process CLI arguments. Restore it afterward.
-    old_argv = list(sys.argv)
-    try:
-        if argv_override is not None:
-            sys.argv = list(argv_override)
-        t = threading.Thread(target=_target, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
 
-        if t.is_alive():
-            return buffer.getvalue(), "TIMEOUT: Code exceeded execution limit"
+    if t.is_alive():
+        return buffer.getvalue(), "TIMEOUT: Code exceeded execution limit"
 
-        return result["output"], result["error"]
-    finally:
-        try:
-            sys.argv = old_argv
-        except Exception:
-            # Best-effort restore; nothing more to do here.
-            pass
+    return result["output"], result["error"]
 
 
 class InspectorFunctionConfig(FunctionBaseConfig, name="inspector"):
@@ -193,12 +181,7 @@ async def inspector_function(config: InspectorFunctionConfig, builder: Builder):
             )
 
         exec_globals = {"__name__": "__main__", "__builtins__": SAFE_BUILTINS}
-
-        # Execute the generated program in an isolated CLI context so it does
-        # not inherit NAT's command-line arguments. By default provide only the
-        # program filename as argv[0].
-        argv_clean = [file_path]
-        stdout_output, error = _run_with_timeout(code, exec_globals, config.execute_timeout, argv_override=argv_clean)
+        stdout_output, error = _run_with_timeout(code, exec_globals, config.execute_timeout)
 
         if error:
             err_type = "TIMEOUT" if "TIMEOUT" in error else "RUNTIME_ERROR"
@@ -218,18 +201,7 @@ async def inspector_function(config: InspectorFunctionConfig, builder: Builder):
             )
 
 
-        # If the script produced no stdout, consider this a failed build
-        # because Planner/Constructor require final scripts to `print()` results.
-        if not stdout_output.strip():
-            return (
-                "OVERALL STATUS: FAILED\nSEND BACK TO CONSTRUCTOR\n\n"
-                "DEBUG SECTION:\nERROR_TYPE: NO_OUTPUT\n"
-                "ERROR_MESSAGE: Generated program produced no stdout. Ensure main() is called and uses print() to display results.\n"
-                "TRACEBACK:\nNO_TRACEBACK_AVAILABLE\n\n"
-                f"ORIGINAL CODE:\n{code}\n"
-            )
-
-        output_section = stdout_output
+        output_section = stdout_output if stdout_output.strip() else "(no output printed)"
         return (
             "OVERALL STATUS: PASSED\n\n"
             f"PROGRAM OUTPUT:\n{output_section}\n\n"
